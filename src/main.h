@@ -32,6 +32,9 @@ class CInv;
 class CRequestTracker;
 class CNode;
 
+typedef std::vector<uint8_t> CurrencyId;
+extern CurrencyId cidShinys;
+
 static const unsigned int MAX_BLOCK_SIZE = 1000000;
 static const unsigned int MAX_BLOCK_SIZE_GEN = MAX_BLOCK_SIZE/2;
 static const unsigned int MAX_BLOCK_SIGOPS = MAX_BLOCK_SIZE/50;
@@ -44,7 +47,6 @@ static const int64 MIN_TX_FEE = CENT;
 static const int64 MIN_RELAY_TX_FEE = CENT;
 static const int64 MAX_MONEY = 2000000000 * COIN;
 static const int64 MAX_MINT_PROOF_OF_WORK = 400 * COIN;
-inline bool MoneyRange(int64 nValue) { return (nValue >= 0 && nValue <= MAX_MONEY); }
 static const int COINBASE_MATURITY = 250;
 static const int COINBASE_MATURITY_TEST = 30;
 // Threshold for nLockTime: below this value it is interpreted as block number, otherwise as UNIX timestamp.
@@ -140,6 +142,17 @@ void BitcoinMiner(CWallet *pwallet, bool fProofOfStake);
 
 
 
+inline bool MoneyRange(int64 nValue)
+{
+    return (nValue >= 0 && nValue <= MAX_MONEY);
+}
+
+inline bool MoneyRange(CurrencyId currency, int64 nValue)
+{
+    if (currency == cidShinys)
+        return MoneyRange(nValue);
+    return nValue >= 0;
+}
 
 
 
@@ -369,7 +382,7 @@ public:
 class CTxOut
 {
 public:
-    std::vector<uint8_t> subCurrency;
+    CurrencyId currency;
     
     int64 nValue;
     CScript scriptPubKey;
@@ -387,7 +400,7 @@ public:
 
     IMPLEMENT_SERIALIZE
     (
-        READWRITE(subCurrency);
+        READWRITE(currency);
         READWRITE(nValue);
         READWRITE(scriptPubKey);
     )
@@ -396,7 +409,7 @@ public:
     {
         nValue = -1;
         scriptPubKey.clear();
-        subCurrency.clear();
+        currency = cidShinys;
     }
 
     bool IsNull()
@@ -408,11 +421,12 @@ public:
     {
         nValue = 0;
         scriptPubKey.clear();
+        currency = cidShinys;
     }
 
     bool IsEmpty() const
     {
-        return (nValue == 0 && scriptPubKey.empty());
+        return (nValue == 0 && scriptPubKey.empty() && currency == cidShinys);
     }
 
     uint256 GetHash() const
@@ -422,7 +436,7 @@ public:
 
     friend bool operator==(const CTxOut& a, const CTxOut& b)
     {
-        return (a.subCurrency  == b.subCurrency &&
+        return (a.currency  == b.currency &&
                 a.nValue       == b.nValue &&
                 a.scriptPubKey == b.scriptPubKey);
     }
@@ -461,11 +475,13 @@ enum GetMinFee_mode
     GMF_SEND,
 };
 
+// ShinyCoin: Transaction type is used to indicate subcurrency transactions
 enum CTransactionType
 {
     TT_NORMAL = 1,
-    TT_MINT_SUBCURRENCY = 101,
-    TT_REMINT_SUBCURRENCY = 102,
+    TT_MINT_SUBCURRENCY = 101,    // create a new subcurrency
+    TT_REMINT_SUBCURRENCY = 102,  // create more of an existing subcurrency
+    TT_CHOWN_SUBCURRENCY = 103,   // change who can remint the subcurrency
 };
 
 typedef std::map<uint256, std::pair<CTxIndex, CTransaction> > MapPrevTx;
@@ -482,11 +498,25 @@ public:
     std::vector<CTxOut> vout;
     unsigned int nLockTime;
 
+    // MINT & REMINT: Full currency name, only lowercale alphanumeric with dashes,
+    // must be unique
     std::string mint_subCurrencyName;
+    // Currency ID, also must be unique. Used instead of naem to save space in the
+    // blockchain.
     std::vector<uint8_t> mint_subCurrencyId;
+    // MINT & REMINT: How many currency coins to create
+    // This transaction's vout must contain transactions sending exactly this many
+    // subcurrency coins
     int64 mint_numUnits;
+    // MINT: how many units = 1 coin?
+    // 1 means no divisibility. 6 means 100000 units = 1 coin
     int64 mint_divisibility;
-    CScript mint_remintScript;
+    // MINT: The pubkey which can be used to remint/chown
+    // CHOWN: The new pubkey which can be used to remint/chown
+    CScript mint_scriptPubKey;
+    // REMINT: scriptsig that matches the scriptPubKey
+    // CHOWN: scriptsig that matches the scriptPubKey
+    CScript mint_scriptSig;
     
     // Denial-of-service detection:
     mutable int nDoS;
@@ -514,13 +544,19 @@ public:
             READWRITE(mint_subCurrencyId);
             READWRITE(mint_numUnits);
             READWRITE(mint_divisibility);
-            READWRITE(mint_remintScript);
+            READWRITE(mint_scriptPubKey);
             break;
         case TT_REMINT_SUBCURRENCY:
             READWRITE(mint_subCurrencyId);
             READWRITE(mint_numUnits);
-            READWRITE(mint_remintScript);
+            READWRITE(mint_scriptSig);
             break;
+        case TT_CHOWN_SUBCURRENCY:
+            READWRITE(mint_subCurrencyId);
+            READWRITE(mint_scriptSig);
+            READWRITE(mint_scriptPubKey);
+            break;
+                
         default:
             throw new std::runtime_error("Attempt to serialize invalid nVersion");
         }
@@ -604,13 +640,29 @@ public:
 
     bool IsCoinBase() const
     {
-        return (vin.size() == 1 && vin[0].prevout.IsNull() && vout.size() >= 1);
+        // ShinyCoin: coinbase must be in Shinies
+        if (!(vin.size() == 1 && vin[0].prevout.IsNull() && vout.size() >= 1))
+            return false;
+        
+        BOOST_FOREACH(const CTxOut &txout, vout)
+            if (txout.currency != cidShinys)
+                return false;
+        
+        return true;
     }
 
     bool IsCoinStake() const
     {
         // ppcoin: the coin stake transaction is marked with the first output empty
-        return (vin.size() > 0 && (!vin[0].prevout.IsNull()) && vout.size() >= 2 && vout[0].IsEmpty());
+        // ShinyCoin: coin stake must be all in Shinies
+        if (!(vin.size() > 0 && (!vin[0].prevout.IsNull()) && vout.size() >= 2 && vout[0].IsEmpty()))
+            return false;
+        
+        BOOST_FOREACH(const CTxOut &txout, vout)
+            if (txout.currency != cidShinys)
+                return false;
+        
+        return true;        
     }
 
     /** Check for standard transaction types
@@ -642,13 +694,16 @@ public:
     /** Amount of bitcoins spent by this transaction.
         @return sum of all outputs (note: does not include fees)
      */
-    int64 GetValueOut() const
+    int64 GetValueOut(const CurrencyId &cid) const
     {
         int64 nValueOut = 0;
         BOOST_FOREACH(const CTxOut& txout, vout)
         {
+            if (txout.currency != cid)
+                continue;
+            
             nValueOut += txout.nValue;
-            if (!MoneyRange(txout.nValue) || !MoneyRange(nValueOut))
+            if (!MoneyRange(cid, txout.nValue) || !MoneyRange(cid, nValueOut))
                 throw std::runtime_error("CTransaction::GetValueOut() : value out of range");
         }
         return nValueOut;
@@ -662,7 +717,7 @@ public:
         @return	Sum of value of all inputs (scriptSigs)
         @see CTransaction::FetchInputs
      */
-    int64 GetValueIn(const MapPrevTx& mapInputs) const;
+    int64 GetValueIn(const CurrencyId &cid, const MapPrevTx& mapInputs) const;
 
     int64 GetMinFee(unsigned int nBlockSize=1, enum GetMinFee_mode mode=GMF_BLOCK) const;
 

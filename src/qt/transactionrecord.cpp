@@ -1,6 +1,7 @@
 #include "transactionrecord.h"
 
 #include "wallet.h"
+#include "main.h"
 
 /* Return positive answer if transaction should be shown in list.
  */
@@ -44,14 +45,14 @@ QList<TransactionRecord> TransactionRecord::decomposeTransaction(const CWallet *
     {
         if (wtx.IsCoinStake()) // ppcoin: coinstake transaction
         {
-            int64 showCredit = wtx.GetValueOut();
+            int64 showCredit = wtx.GetValueOut(cidShinys);
             
             BOOST_FOREACH(const PAIRTYPE(const uint256, CWalletTx)& hash_tx, wallet->mapWallet)
             {
                 const CWalletTx &otherTx = hash_tx.second;
                 if (otherTx.hashBlock == wtx.hashBlock && otherTx.IsCoinBase())
                 {
-                    showCredit += otherTx.GetValueOut();
+                    showCredit += otherTx.GetValueOut(cidShinys);
                     break;
                 }
             }
@@ -132,7 +133,7 @@ QList<TransactionRecord> TransactionRecord::decomposeTransaction(const CWallet *
                 //
                 // Debit
                 //
-                int64 nTxFee = nDebit - wtx.GetValueOut();
+                int64 nTxFee = nDebit - wtx.GetValueOut(cidShinys);
 
                 for (int nOut = 0; nOut < wtx.vout.size(); nOut++)
                 {

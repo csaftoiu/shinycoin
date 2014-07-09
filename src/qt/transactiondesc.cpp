@@ -194,7 +194,7 @@ QString TransactionDesc::toHTML(CWallet *wallet, CWalletTx &wtx)
                     strHTML += tr("<b>Credit:</b> ") + BitcoinUnits::formatWithUnit(BitcoinUnits::BTC, nValue) + "<br>";
                 }
 
-                int64 nTxFee = nDebit - wtx.GetValueOut();
+                int64 nTxFee = nDebit - wtx.GetValueOut(cidShinys);
                 if (nTxFee > 0)
                     strHTML += tr("<b>Transaction fee:</b> ") + BitcoinUnits::formatWithUnit(BitcoinUnits::BTC,-nTxFee) + "<br>";
             }
@@ -223,7 +223,7 @@ QString TransactionDesc::toHTML(CWallet *wallet, CWalletTx &wtx)
                 const CWalletTx &otherTx = hash_tx.second;
                 if (otherTx.hashBlock == wtx.hashBlock && otherTx.IsCoinBase())
                 {
-                    nFeesFromCoinbase = otherTx.GetValueOut();
+                    nFeesFromCoinbase = otherTx.GetValueOut(cidShinys);
                     if (nFeesFromCoinbase > 0)
                     {
                         strHTML += tr("<b>Extra coinbase amount:</b> ") + BitcoinUnits::formatWithUnit(BitcoinUnits::BTC, nFeesFromCoinbase, true) + "<br>";

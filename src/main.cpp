@@ -26,6 +26,8 @@ using namespace boost;
 // Global state
 //
 
+CurrencyId cidShinys = CurrencyId();
+
 CCriticalSection cs_setpwalletRegistered;
 set<CWallet*> setpwalletRegistered;
 
@@ -477,16 +479,37 @@ int CMerkleTx::SetMerkleBranch(const CBlock* pblock)
 bool CTransaction::CheckTransaction() const
 {
     // Basic checks that don't depend on any context
+    
+    switch (nVersion)
+    {
+        case TT_NORMAL:
+            break;
+        case TT_MINT_SUBCURRENCY:
+            if (mint_subCurrencyName.empty())
+                return DoS(10, error("CTransaction::CheckTransaction() : Mint subcurrency name empty"));
+            if (mint_subCurrencyId.empty())
+                return DoS(10, error("CTransaction::CheckTransaction() : Mint subcurrency id empty"));
+            if (mint_numUnits <= 0)
+                return DoS(10, error("CTransaction::CheckTransaction() : Mint units <= 0"));
+            if (mint_divisibility <= 0)
+                return DoS(10, error("CTransaction::CheckTransaction() : Mint divisibility <= 0"));
+            break;
+        case TT_REMINT_SUBCURRENCY:
+            if (mint_subCurrencyId.empty())
+                return DoS(10, error("CTransaction::CheckTransaction() : Re-mint subcurrency id empty"));
+            if (mint_numUnits <= 0)
+                return DoS(10, error("CTransaction::CheckTransaction() : Re-mint units <= 0"));
+            break;
+        case TT_CHOWN_SUBCURRENCY:
+            if (mint_subCurrencyId.empty())
+                return DoS(10, error("CTransaction::CheckTransaction() : Re-mint subcurrency id empty"));
+            break;
+        default:
+            return DoS(10, error("CTransaction::CheckTransaction() : Invalid tx version"));
+    }
 
-    if (nVersion != 1)
-        return DoS(10, error("CTransaction::CheckTransaction() : Found nVersion other than 1"));
-
-    BOOST_FOREACH(const CTxOut& txout, vout)
-        if (!txout.subCurrency.empty())
-            return DoS(10, error("CTransaction:::CheckTransaction() : Subcurrency not implemented yet"));
-
-    // Need at least 1 input
-    if (vin.empty())
+    // ShinyCoin: Need at least 1 input, or to be minting
+    if (vin.empty() && !(nVersion == TT_MINT_SUBCURRENCY || TT_REMINT_SUBCURRENCY))
         return DoS(10, error("CTransaction::CheckTransaction() : vin empty"));
 
     bool haveDbs = false;
@@ -506,7 +529,7 @@ bool CTransaction::CheckTransaction() const
         return DoS(100, error("CTransaction::CheckTransaction() : size limits failed"));
 
     // Check for negative or overflow output values
-    int64 nValueOut = 0;
+    map<CurrencyId, int64> mapValueOut;
     for (int i = 0; i < vout.size(); i++)
     {
         const CTxOut& txout = vout[i];
@@ -517,10 +540,11 @@ bool CTransaction::CheckTransaction() const
         if (txout.nValue < 0) {
             return DoS(100, error("CTransaction::CheckTransaction() : negative txout.nValue"));
         }
-        nValueOut += txout.nValue;
+        mapValueOut[txout.currency] += txout.nValue;
     }
-    if (!MoneyRange(nValueOut))
-        return DoS(100, error("CTransaction::CheckTransaction() : txout total out of range"));
+    BOOST_FOREACH(const PAIRTYPE(CurrencyId, int64)& item, mapValueOut)
+        if (!MoneyRange(item.first, item.second))
+            return DoS(100, error("CTransaction::CheckTransaction() : txout total out of range"));
 
     // Check for duplicate inputs
     set<COutPoint> vInOutPoints;
@@ -635,7 +659,7 @@ bool CTxMemPool::checkAccept(CTxDB& txdb, CTransaction &tx, bool fCheckInputs, b
         // you should add code here to check that the transaction does a
         // reasonable number of ECDSA signature verifications.
 
-        int64 nFees = tx.GetValueIn(mapInputs)-tx.GetValueOut();
+        int64 nFees = tx.GetValueIn(cidShinys, mapInputs) - tx.GetValueOut(cidShinys);
         unsigned int nSize = ::GetSerializeSize(tx, SER_NETWORK, PROTOCOL_VERSION);
 
         // Don't accept it if it can't get into a block
@@ -1325,7 +1349,7 @@ const CTxOut& CTransaction::GetOutputFor(const CTxIn& input, const MapPrevTx& in
     return txPrev.vout[input.prevout.n];
 }
 
-int64 CTransaction::GetValueIn(const MapPrevTx& inputs) const
+int64 CTransaction::GetValueIn(const CurrencyId& cid, const MapPrevTx& inputs) const
 {
     if (IsCoinBase())
         return 0;
@@ -1333,7 +1357,11 @@ int64 CTransaction::GetValueIn(const MapPrevTx& inputs) const
     int64 nResult = 0;
     for (unsigned int i = 0; i < vin.size(); i++)
     {
-        nResult += GetOutputFor(vin[i], inputs).nValue;
+        const CTxOut &prevout = GetOutputFor(vin[i], inputs);
+        if (prevout.currency != cid)
+            continue;
+        
+        nResult += prevout.nValue;
     }
     return nResult;
 
@@ -1388,101 +1416,116 @@ bool CTransaction::ConnectInputs(CTxDB& txdb, MapPrevTx inputs,
                                  map<uint256, CTxIndex>& mapTestPool, const CDiskTxPos& posThisTx,
                                  const CBlockIndex* pindexBlock, bool fBlock, bool fMiner)
 {
+    if (IsCoinBase())
+        return true;
+    
     // Take over previous transactions' spent pointers
     // fBlock is true when this is called from AcceptBlock when a new best-block is added to the blockchain
     // fMiner is true when called from the internal bitcoin miner
     // ... both are false when called from CTransaction::AcceptToMemoryPool
-    if (!IsCoinBase())
+    
+    // ShinyCoin: Keep track of each currency separately
+    map<CurrencyId, int64> mapValueIn;
+    
+    // ShinyCoin: Tx can spend up to the mint amount for that new subcurrency
+    switch (nVersion) {
+        case TT_MINT_SUBCURRENCY:
+        case TT_REMINT_SUBCURRENCY:
+            mapValueIn[mint_subCurrencyId] += mint_numUnits;
+            break;
+    }
+    
+    int64 nFees = 0;
+    for (unsigned int i = 0; i < vin.size(); i++)
     {
-        int64 nValueIn = 0;
-        int64 nFees = 0;
-        for (unsigned int i = 0; i < vin.size(); i++)
+        COutPoint prevout = vin[i].prevout;
+        assert(inputs.count(prevout.hash) > 0);
+        CTxIndex& txindex = inputs[prevout.hash].first;
+        CTransaction& txPrev = inputs[prevout.hash].second;
+
+        if (prevout.n >= txPrev.vout.size() || prevout.n >= txindex.vSpent.size())
+            return DoS(100, error("ConnectInputs() : %s prevout.n out of range %d %d %d prev tx %s\n%s", GetHash().ToString().substr(0,10).c_str(), prevout.n, txPrev.vout.size(), txindex.vSpent.size(), prevout.hash.ToString().substr(0,10).c_str(), txPrev.ToString().c_str()));
+
+        // If prev is coinbase/coinstake, check that it's matured
+        if (txPrev.IsCoinBase() || txPrev.IsCoinStake())
+            for (const CBlockIndex* pindex = pindexBlock; pindex && pindexBlock->nHeight - pindex->nHeight < nCoinbaseMaturity; pindex = pindex->pprev)
+                if (pindex->nBlockPos == txindex.pos.nBlockPos && pindex->nFile == txindex.pos.nFile)
+                    return error("ConnectInputs() : tried to spend coinbase/coinstake at depth %d", pindexBlock->nHeight - pindex->nHeight);
+
+        // ppcoin: check transaction timestamp
+        if (txPrev.nTime > nTime)
+            return DoS(100, error("ConnectInputs() : transaction timestamp earlier than input transaction"));
+
+        // Check for negative or overflow input values
+        CurrencyId &cid = txPrev.vout[prevout.n].currency;
+        mapValueIn[cid] += txPrev.vout[prevout.n].nValue;
+        if (!MoneyRange(cid, txPrev.vout[prevout.n].nValue) || !MoneyRange(cid, mapValueIn[cid]))
+            return DoS(100, error("ConnectInputs() : txin values out of range"));
+
+    }
+    // The first loop above does all the inexpensive checks.
+    // Only if ALL inputs pass do we perform expensive ECDSA signature checks.
+    // Helps prevent CPU exhaustion attacks.
+    for (unsigned int i = 0; i < vin.size(); i++)
+    {
+        COutPoint prevout = vin[i].prevout;
+        assert(inputs.count(prevout.hash) > 0);
+        CTxIndex& txindex = inputs[prevout.hash].first;
+        CTransaction& txPrev = inputs[prevout.hash].second;
+
+        // Check for conflicts (double-spend)
+        // This doesn't trigger the DoS code on purpose; if it did, it would make it easier
+        // for an attacker to attempt to split the network.
+        if (!txindex.vSpent[prevout.n].IsNull())
+            return fMiner ? false : error("ConnectInputs() : %s prev tx already used at %s", GetHash().ToString().substr(0,10).c_str(), txindex.vSpent[prevout.n].ToString().c_str());
+
+        // Skip ECDSA signature verification when connecting blocks (fBlock=true)
+        // before the last blockchain checkpoint. This is safe because block merkle hashes are
+        // still computed and checked, and any change will be caught at the next checkpoint.
+        if (!(fBlock && (nBestHeight < Checkpoints::GetTotalBlocksEstimate())))
         {
-            COutPoint prevout = vin[i].prevout;
-            assert(inputs.count(prevout.hash) > 0);
-            CTxIndex& txindex = inputs[prevout.hash].first;
-            CTransaction& txPrev = inputs[prevout.hash].second;
-
-            if (prevout.n >= txPrev.vout.size() || prevout.n >= txindex.vSpent.size())
-                return DoS(100, error("ConnectInputs() : %s prevout.n out of range %d %d %d prev tx %s\n%s", GetHash().ToString().substr(0,10).c_str(), prevout.n, txPrev.vout.size(), txindex.vSpent.size(), prevout.hash.ToString().substr(0,10).c_str(), txPrev.ToString().c_str()));
-
-            // If prev is coinbase/coinstake, check that it's matured
-            if (txPrev.IsCoinBase() || txPrev.IsCoinStake())
-                for (const CBlockIndex* pindex = pindexBlock; pindex && pindexBlock->nHeight - pindex->nHeight < nCoinbaseMaturity; pindex = pindex->pprev)
-                    if (pindex->nBlockPos == txindex.pos.nBlockPos && pindex->nFile == txindex.pos.nFile)
-                        return error("ConnectInputs() : tried to spend coinbase/coinstake at depth %d", pindexBlock->nHeight - pindex->nHeight);
-
-            // ppcoin: check transaction timestamp
-            if (txPrev.nTime > nTime)
-                return DoS(100, error("ConnectInputs() : transaction timestamp earlier than input transaction"));
-
-            // Check for negative or overflow input values
-            nValueIn += txPrev.vout[prevout.n].nValue;
-            if (!MoneyRange(txPrev.vout[prevout.n].nValue) || !MoneyRange(nValueIn))
-                return DoS(100, error("ConnectInputs() : txin values out of range"));
-
-        }
-        // The first loop above does all the inexpensive checks.
-        // Only if ALL inputs pass do we perform expensive ECDSA signature checks.
-        // Helps prevent CPU exhaustion attacks.
-        for (unsigned int i = 0; i < vin.size(); i++)
-        {
-            COutPoint prevout = vin[i].prevout;
-            assert(inputs.count(prevout.hash) > 0);
-            CTxIndex& txindex = inputs[prevout.hash].first;
-            CTransaction& txPrev = inputs[prevout.hash].second;
-
-            // Check for conflicts (double-spend)
-            // This doesn't trigger the DoS code on purpose; if it did, it would make it easier
-            // for an attacker to attempt to split the network.
-            if (!txindex.vSpent[prevout.n].IsNull())
-                return fMiner ? false : error("ConnectInputs() : %s prev tx already used at %s", GetHash().ToString().substr(0,10).c_str(), txindex.vSpent[prevout.n].ToString().c_str());
-
-            // Skip ECDSA signature verification when connecting blocks (fBlock=true)
-            // before the last blockchain checkpoint. This is safe because block merkle hashes are
-            // still computed and checked, and any change will be caught at the next checkpoint.
-            if (!(fBlock && (nBestHeight < Checkpoints::GetTotalBlocksEstimate())))
+            // Verify signature
+            if (!VerifySignature(txPrev, *this, i, 0))
             {
-                // Verify signature
-                if (!VerifySignature(txPrev, *this, i, 0))
-                {
-                    return DoS(100,error("ConnectInputs() : %s VerifySignature failed", GetHash().ToString().substr(0,10).c_str()));
-                }
-            }
-
-            // Mark outpoints as spent
-            txindex.vSpent[prevout.n] = posThisTx;
-
-            // Write back
-            if (fBlock || fMiner)
-            {
-                mapTestPool[prevout.hash] = txindex;
+                return DoS(100,error("ConnectInputs() : %s VerifySignature failed", GetHash().ToString().substr(0,10).c_str()));
             }
         }
 
-        if (IsCoinStake())
-        {
-            // ppcoin: coin stake tx earns reward instead of paying fee
-            uint64 nCoinAgeSeconds;
-            if (!GetCoinAge(txdb, nCoinAgeSeconds))
-                return error("ConnectInputs() : %s unable to get coin age for coinstake", GetHash().ToString().substr(0,10).c_str());
-            int64 nStakeReward = GetValueOut() - nValueIn;
-            if (nStakeReward > GetProofOfStakeReward(nCoinAgeSeconds) - GetMinFee() + MIN_TX_FEE)
-                return DoS(100, error("ConnectInputs() : %s stake reward exceeded", GetHash().ToString().substr(0,10).c_str()));
-        }
-        else
-        {
-            if (nValueIn < GetValueOut())
-                return DoS(100, error("ConnectInputs() : %s value in < value out", GetHash().ToString().substr(0,10).c_str()));
+        // Mark outpoints as spent
+        txindex.vSpent[prevout.n] = posThisTx;
 
-            // Tally transaction fees
-            int64 nTxFee = nValueIn - GetValueOut();
-            if (nTxFee < 0)
-                return DoS(100, error("ConnectInputs() : %s nTxFee < 0", GetHash().ToString().substr(0,10).c_str()));
-            nFees += nTxFee;
-            if (!MoneyRange(nFees))
-                return DoS(100, error("ConnectInputs() : nFees out of range"));
+        // Write back
+        if (fBlock || fMiner)
+        {
+            mapTestPool[prevout.hash] = txindex;
         }
+    }
+
+    if (IsCoinStake())
+    {
+        // ppcoin: coin stake tx earns reward instead of paying fee
+        uint64 nCoinAgeSeconds;
+        if (!GetCoinAge(txdb, nCoinAgeSeconds))
+            return error("ConnectInputs() : %s unable to get coin age for coinstake", GetHash().ToString().substr(0,10).c_str());
+        int64 nStakeReward = GetValueOut(cidShinys) - mapValueIn[cidShinys];
+        if (nStakeReward > GetProofOfStakeReward(nCoinAgeSeconds) - GetMinFee() + MIN_TX_FEE)
+            return DoS(100, error("ConnectInputs() : %s stake reward exceeded", GetHash().ToString().substr(0,10).c_str()));
+    }
+    else
+    {
+        BOOST_FOREACH(const PAIRTYPE(CurrencyId, int64)& item, mapValueIn)
+        {
+            if (item.second < GetValueOut(item.first))
+                return DoS(100, error("ConnectInputs() : %s value in < value out", GetHash().ToString().substr(0,10).c_str()));            
+        }
+
+        // Tally transaction fees
+        int64 nTxFee = mapValueIn[cidShinys] - GetValueOut(cidShinys);
+        if (nTxFee < 0)
+            return DoS(100, error("ConnectInputs() : %s nTxFee < 0", GetHash().ToString().substr(0,10).c_str()));
+        nFees += nTxFee;
+        if (!MoneyRange(cidShinys, nFees))
+            return DoS(100, error("ConnectInputs() : nFees out of range"));
     }
 
     return true;
@@ -1541,7 +1584,7 @@ bool CTransaction::ClientConnectInputs()
     // Take over previous transactions' spent pointers
     {
         LOCK(mempool.cs);
-        int64 nValueIn = 0;
+        map<CurrencyId, int64> mapValueIn;
         for (unsigned int i = 0; i < vin.size(); i++)
         {
             // Get prev tx from single transactions in memory
@@ -1555,7 +1598,7 @@ bool CTransaction::ClientConnectInputs()
 
             // Verify signature
             if (!VerifySignature(txPrev, *this, i, 0))
-                return error("ConnectInputs() : VerifySignature failed");
+                return error("ClientConnectInputs() : VerifySignature failed");
 
             ///// this is redundant with the mempool.mapNextTx stuff,
             ///// not sure which I want to get rid of
@@ -1566,14 +1609,16 @@ bool CTransaction::ClientConnectInputs()
             //
             // // Flag outpoints as used
             // txPrev.vout[prevout.n].posNext = posThisTx;
+            
+            CurrencyId cid = txPrev.vout[prevout.n].currency;
+            mapValueIn[cid] += txPrev.vout[prevout.n].nValue;
 
-            nValueIn += txPrev.vout[prevout.n].nValue;
-
-            if (!MoneyRange(txPrev.vout[prevout.n].nValue) || !MoneyRange(nValueIn))
+            if (!MoneyRange(cid, txPrev.vout[prevout.n].nValue) || !MoneyRange(cid, mapValueIn[cid]))
                 return error("ClientConnectInputs() : txin values out of range");
         }
-        if (GetValueOut() > nValueIn)
-            return false;
+        BOOST_FOREACH(const PAIRTYPE(CurrencyId, int64)& item, mapValueIn)
+            if (item.second < GetValueOut(item.first))
+                return DoS(100, error("ConnectInputs() : %s value in < value out", GetHash().ToString().substr(0,10).c_str()));            
     }
 
     return true;
@@ -1643,8 +1688,8 @@ bool CBlock::ConnectBlock(CTxDB& txdb, CBlockIndex* pindex)
 
     map<uint256, CTxIndex> mapQueuedChanges;
     int64 nFees = 0;
-    int64 nValueIn = 0;
-    int64 nValueOut = 0;
+    int64 nShinyValueIn = 0;
+    int64 nShinyValueOut = 0;
     unsigned int nSigOps = 0;
     unsigned int nTx = 0;
     BOOST_FOREACH(CTransaction& tx, vtx)
@@ -1658,7 +1703,7 @@ bool CBlock::ConnectBlock(CTxDB& txdb, CBlockIndex* pindex)
 
         MapPrevTx mapInputs;
         if (tx.IsCoinBase())
-            nValueOut += tx.GetValueOut();
+            nShinyValueOut += tx.GetValueOut(cidShinys);
         else
         {
             bool fInvalid;
@@ -1672,12 +1717,12 @@ bool CBlock::ConnectBlock(CTxDB& txdb, CBlockIndex* pindex)
             if (nSigOps > MAX_BLOCK_SIGOPS)
                 return DoS(100, error("ConnectBlock() : too many sigops"));
 
-            int64 nTxValueIn = tx.GetValueIn(mapInputs);
-            int64 nTxValueOut = tx.GetValueOut();
-            nValueIn += nTxValueIn;
-            nValueOut += nTxValueOut;
+            int64 nTxShinyValueIn = tx.GetValueIn(cidShinys, mapInputs);
+            int64 nTxShinyValueOut = tx.GetValueOut(cidShinys);
+            nShinyValueIn += nTxShinyValueIn;
+            nShinyValueOut += nTxShinyValueOut;
             if (!tx.IsCoinStake())
-                nFees += nTxValueIn - nTxValueOut;
+                nFees += nTxShinyValueIn - nTxShinyValueOut;
 
             if (!tx.ConnectInputs(txdb, mapInputs, mapQueuedChanges, posThisTx, pindex, true, false))
                 return false;
@@ -1691,23 +1736,23 @@ bool CBlock::ConnectBlock(CTxDB& txdb, CBlockIndex* pindex)
     }
 
     int64 nCoinbaseReward = nFees + (IsProofOfWork() ? GetNextProofOfWorkReward(pindex->pprev, true) : 0);
-    if (vtx[0].GetValueOut() > nCoinbaseReward)
+    if (vtx[0].GetValueOut(cidShinys) > nCoinbaseReward)
         return DoS(50, error("ConnectBlock() : coinbase reward exceeded %s > %s",
-                             FormatMoney(vtx[0].GetValueOut()).c_str(),
+                             FormatMoney(vtx[0].GetValueOut(cidShinys)).c_str(),
                              FormatMoney(nCoinbaseReward).c_str()));
 
     // ppcoin: track money supply and mint amount info
-    pindex->nMint = nValueOut - nValueIn + nFees;
-    pindex->nMoneySupply = (pindex->pprev ? pindex->pprev->nMoneySupply : 0) + nValueOut - nValueIn;
-    pindex->nPoSTotalMint = (pindex->pprev ? pindex->pprev->nPoSTotalMint : 0) + (IsProofOfStake() ? nValueOut - nValueIn : 0);
+    pindex->nMint = nShinyValueOut - nShinyValueIn + nFees;
+    pindex->nMoneySupply = (pindex->pprev ? pindex->pprev->nMoneySupply : 0) + nShinyValueOut - nShinyValueIn;
+    pindex->nPoSTotalMint = (pindex->pprev ? pindex->pprev->nPoSTotalMint : 0) + (IsProofOfStake() ? nShinyValueOut - nShinyValueIn : 0);
     pindex->nPoSDebt = (pindex->pprev ? pindex->pprev->nPoSDebt : 0);
     if (IsProofOfStake())
     {
-        pindex->nPoSDebt += nValueOut - nValueIn;
+        pindex->nPoSDebt += nShinyValueOut - nShinyValueIn;
     }
     else
     {
-        pindex->nPoSDebt -= GetNextProofOfWorkReward(pindex->pprev, false) - (vtx[0].GetValueOut() - nFees);
+        pindex->nPoSDebt -= GetNextProofOfWorkReward(pindex->pprev, false) - (vtx[0].GetValueOut(cidShinys) - nFees);
     }
 
 
@@ -4027,7 +4072,7 @@ CBlock* CreateNewBlock(CReserveKey& reservekey, CWallet* pwallet, bool fProofOfS
             if (!tx.FetchInputs(txdb, mapTestPoolTmp, false, true, mapInputs, fInvalid))
                 continue;
 
-            int64 nTxFees = tx.GetValueIn(mapInputs)-tx.GetValueOut();
+            int64 nTxFees = tx.GetValueIn(cidShinys, mapInputs) - tx.GetValueOut(cidShinys);
             if (nTxFees < nMinFee)
                 continue;
 

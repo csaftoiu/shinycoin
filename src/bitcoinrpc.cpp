@@ -1585,7 +1585,7 @@ Value gettransaction(const Array& params, bool fHelp)
     int64 nCredit = wtx.GetCredit();
     int64 nDebit = wtx.GetDebit();
     int64 nNet = nCredit - nDebit;
-    int64 nFee = (wtx.IsFromMe() ? wtx.GetValueOut() - nDebit : 0);
+    int64 nFee = (wtx.IsFromMe() ? wtx.GetValueOut(cidShinys) - nDebit : 0);
 
     entry.push_back(Pair("amount", ValueFromAmount(nNet - nFee)));
     if (wtx.IsFromMe())
@@ -2077,7 +2077,7 @@ Value getblocktemplate(const Array& params, bool fHelp)
             bool fInvalid = false;
             if (tx.FetchInputs(txdb, mapUnused, false, false, mapInputs, fInvalid))
             {
-                entry.push_back(Pair("fee", (int64_t)(tx.GetValueIn(mapInputs) - tx.GetValueOut())));
+                entry.push_back(Pair("fee", (int64_t)(tx.GetValueIn(cidShinys, mapInputs) - tx.GetValueOut(cidShinys))));
 
                 Array deps;
                 BOOST_FOREACH (MapPrevTx::value_type& inp, mapInputs)

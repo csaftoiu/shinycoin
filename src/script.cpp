@@ -1056,6 +1056,8 @@ uint256 SignatureHash(CScript scriptCode, const CTransaction& txTo, unsigned int
     for (unsigned int i = 0; i < txTmp.vin.size(); i++)
         txTmp.vin[i].scriptSig = CScript();
     txTmp.vin[nIn].scriptSig = scriptCode;
+    // ShinyCoin: blank out scriptsig for REMINT/CHOWN transactions
+    txTmp.mint_scriptSig = CScript();
 
     // Blank out some of the outputs
     if ((nHashType & 0x1f) == SIGHASH_NONE)
