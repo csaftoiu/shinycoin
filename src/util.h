@@ -757,5 +757,13 @@ inline uint32_t ByteReverse(uint32_t value)
     return (value<<16) | (value>>16);
 }
 
-#endif
+
+/**
+ * Return whether testString contains only the characters found in strValidChars
+ */
+bool IsValidString(const std::string& testString, const std::string& strValidChars);
+
+
+
+#endif // BITCOIN_UTIL_H
 

@@ -257,4 +257,12 @@ BOOST_AUTO_TEST_CASE(util_IsHex)
     BOOST_CHECK(!IsHex("0x0000"));
 }
 
+BOOST_AUTO_TEST_CASE(util_valid_string)
+{
+    BOOST_CHECK(!IsValidString("hello there", "abcdefghijklmnopqrstuvwxyz"));
+    BOOST_CHECK(IsValidString("hello there", "abcdefghijklmnopqrstuvwxyz "));
+    BOOST_CHECK(!IsValidString("helloThere", "abcdefghijklmnopqrstuvwxyz"));
+    BOOST_CHECK(IsValidString("helloThere", "olheTr"));
+}
+
 BOOST_AUTO_TEST_SUITE_END()

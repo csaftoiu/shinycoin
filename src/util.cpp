@@ -1378,3 +1378,14 @@ void LeaveCritical()
 }
 
 #endif /* DEBUG_LOCKORDER */
+
+bool IsValidString(const std::string& testString, const std::string& strValidChars) {
+    for (std::string::const_iterator it = testString.begin(); it != testString.end(); ++it) {
+        if (strValidChars.find(*it) == std::string::npos) {
+            return false;
+        }
+    }
+    
+    return true;
+}
+

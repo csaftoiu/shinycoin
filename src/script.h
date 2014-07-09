@@ -575,5 +575,7 @@ bool ExtractAddress(const CScript& scriptPubKey, CBitcoinAddress& addressRet);
 bool ExtractAddresses(const CScript& scriptPubKey, txnouttype& typeRet, std::vector<CBitcoinAddress>& addressRet, int& nRequiredRet);
 bool SignSignature(const CKeyStore& keystore, const CTransaction& txFrom, CTransaction& txTo, unsigned int nIn, int nHashType=SIGHASH_ALL);
 bool VerifySignature(const CTransaction& txFrom, const CTransaction& txTo, unsigned int nIn, int nHashType);
+bool VerifyScript(const CScript& scriptSig, const CScript& scriptPubKey, const CTransaction& txTo, unsigned int nIn,
+                  int nHashType);
 
 #endif

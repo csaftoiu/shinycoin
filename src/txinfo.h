@@ -30,10 +30,7 @@ enum TxInfoType
 class TxInfoKey
 {
 public:
-    static bool IsValidIDCharacter(char c) {
-        
-        return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || (c == '-');
-    }
+    static const std::string strValidIDCharacters;
     
     unsigned char type;
     std::string keyString;

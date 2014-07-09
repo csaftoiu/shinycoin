@@ -8,6 +8,7 @@
 #define BITCOIN_DB_H
 
 #include "main.h"
+#include "currency.h"
 
 #include <map>
 #include <string>
@@ -305,11 +306,19 @@ public:
     bool WriteSignedHashPubKey(const std::string& strPubKey);
     bool ReadV04UpgradeTime(unsigned int& nUpgradeTime);
     bool WriteV04UpgradeTime(const unsigned int& nUpgradeTime);
+    // ShinyCoin: cache PoW hashes
     bool ReadPoWHash(uint256 idHash, uint256 &powHash);
     bool WritePoWHash(uint256 idHash, const uint256 &powHash);
+    // ShinyCoin: signed hashes
     bool ReadSignedHash(uint256 idHash, uint256 &powHash, std::vector<unsigned char> &vchSig);
     bool WriteSignedHash(uint256 idHash, const uint256 &powHash, const std::vector<unsigned char> &vchSig);
     bool EraseSignedHash(uint256 idHash);
+    // ShinyCoin: currency data, CurrencyId -> CCurrency and name -> CurrencyId
+    bool ContainsCurrency(const CurrencyId &cid);
+    bool ContainsCurrency(const std::string &strName);
+    bool ReadCurrencyId(const std::string &strName, CurrencyId &cid);
+    bool ReadCurrency(const CurrencyId &cid, CCurrency &currency);
+    bool WriteCurrency(const CCurrency &currency);
     
     bool LoadBlockIndex();
 };

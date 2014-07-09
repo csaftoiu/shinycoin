@@ -573,6 +573,47 @@ bool CTxDB::EraseSignedHash(uint256 idHash)
     return Erase(make_pair(string("signedhash"), idHash));
 }
 
+bool CTxDB::ContainsCurrency(const CurrencyId &cid) {
+    return Exists(make_pair(string("currency"), cid));
+}
+
+bool CTxDB::ContainsCurrency(const std::string &strName) {
+    return Exists(make_pair(string("currency_id"), strName));
+}
+
+bool CTxDB::ReadCurrencyId(const std::string &strName, CurrencyId &cid) {
+    if (!Read(make_pair(string("currency_id"), strName), cid))
+        return false;
+    
+    if (!ContainsCurrency(cid))
+        throw new std::runtime_error("txdb contains currency name but not id");
+    
+    return true;
+}
+
+bool CTxDB::ReadCurrency(const CurrencyId &cid, CCurrency &currency) {
+    if (!Read(make_pair(string("currency"), cid), currency))
+        return false;
+    
+    if (currency.cid != cid)
+        throw new std::runtime_error("txdb has currency stored with wrong id");
+    
+    if (!ContainsCurrency(currency.strName))
+        throw new std::runtime_error("txdb contains currency id but not name");
+    
+    return true;
+}
+
+bool CTxDB::WriteCurrency(const CCurrency &currency) {
+    if (ContainsCurrency(currency.cid) != ContainsCurrency(currency.strName))
+        throw new std::runtime_error("txdb contains currency id but not name, or name but not id");
+    
+    if (!Write(make_pair(string("currency"), currency.cid), currency))
+        return false;
+    
+    return Write(make_pair(string("currency_id"), currency.strName), currency.cid);
+}
+
 CBlockIndex static * InsertBlockIndex(uint256 hash)
 {
     if (hash == 0)

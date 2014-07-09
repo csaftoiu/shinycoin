@@ -1055,10 +1055,17 @@ uint256 SignatureHash(CScript scriptCode, const CTransaction& txTo, unsigned int
     // Blank out other inputs' signatures
     for (unsigned int i = 0; i < txTmp.vin.size(); i++)
         txTmp.vin[i].scriptSig = CScript();
-    txTmp.vin[nIn].scriptSig = scriptCode;
-    // ShinyCoin: blank out scriptsig for REMINT/CHOWN transactions
-    txTmp.mint_scriptSig = CScript();
-
+    
+    // ShinyCoin: REMINT/CHOWN use the mint_scriptSig field
+    bool fRemintChown = txTo.nVersion == TT_REMINT_SUBCURRENCY || txTo.nVersion == TT_CHOWN_SUBCURRENCY;
+    if (fRemintChown) {
+        txTmp.mint_scriptSig = scriptCode;
+    }
+    else {
+        txTmp.vin[nIn].scriptSig = scriptCode;
+        txTmp.mint_scriptSig = CScript();
+    }
+    
     // Blank out some of the outputs
     if ((nHashType & 0x1f) == SIGHASH_NONE)
     {
@@ -1067,11 +1074,16 @@ uint256 SignatureHash(CScript scriptCode, const CTransaction& txTo, unsigned int
 
         // Let the others update at will
         for (unsigned int i = 0; i < txTmp.vin.size(); i++)
-            if (i != nIn)
+            if (fRemintChown || i != nIn)
                 txTmp.vin[i].nSequence = 0;
     }
     else if ((nHashType & 0x1f) == SIGHASH_SINGLE)
     {
+        if (fRemintChown) {
+            printf("ERROR: SignatureHash() : SIGHASH_SINGLE makes no sense for remint/chown transactions");
+            return 1;
+        }
+        
         // Only lockin the txout payee at same index as txin
         unsigned int nOut = nIn;
         if (nOut >= txTmp.vout.size())
@@ -1092,8 +1104,13 @@ uint256 SignatureHash(CScript scriptCode, const CTransaction& txTo, unsigned int
     // Blank out other inputs completely, not recommended for open transactions
     if (nHashType & SIGHASH_ANYONECANPAY)
     {
-        txTmp.vin[0] = txTmp.vin[nIn];
-        txTmp.vin.resize(1);
+        if (fRemintChown) {
+            txTmp.vin.resize(0);
+        }
+        else {
+            txTmp.vin[0] = txTmp.vin[nIn];
+            txTmp.vin.resize(1);
+        }
     }
 
     // Serialize and hash

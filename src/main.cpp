@@ -26,8 +26,6 @@ using namespace boost;
 // Global state
 //
 
-CurrencyId cidShinys = CurrencyId();
-
 CCriticalSection cs_setpwalletRegistered;
 set<CWallet*> setpwalletRegistered;
 
@@ -292,6 +290,8 @@ unsigned int LimitOrphanTxSize(unsigned int nMaxOrphans)
 // CTransaction and CTxIndex
 //
 
+const std::string CTransaction::strValidCurrencyNameCharacters("abcdefghijklmnopqrstuvwxyz0123456789-");
+
 bool CTransaction::ReadFromDisk(CTxDB& txdb, COutPoint prevout, CTxIndex& txindexRet)
 {
     SetNull();
@@ -487,6 +487,8 @@ bool CTransaction::CheckTransaction() const
         case TT_MINT_SUBCURRENCY:
             if (mint_subCurrencyName.empty())
                 return DoS(10, error("CTransaction::CheckTransaction() : Mint subcurrency name empty"));
+            if (!IsValidString(mint_subCurrencyName, CTransaction::strValidCurrencyNameCharacters))
+                return DoS(10, error("Ctransaction::CheckTransaction() : Invalid subcurrency name"));
             if (mint_subCurrencyId.empty())
                 return DoS(10, error("CTransaction::CheckTransaction() : Mint subcurrency id empty"));
             if (mint_numUnits <= 0)
@@ -545,6 +547,10 @@ bool CTransaction::CheckTransaction() const
     BOOST_FOREACH(const PAIRTYPE(CurrencyId, int64)& item, mapValueOut)
         if (!MoneyRange(item.first, item.second))
             return DoS(100, error("CTransaction::CheckTransaction() : txout total out of range"));
+    
+    if (nVersion == TT_MINT_SUBCURRENCY || nVersion == TT_REMINT_SUBCURRENCY)
+        if (mapValueOut[mint_subCurrencyId] != mint_numUnits)
+            return DoS(100, error("CTransaction::CheckTransaction() : not spending all newly minted coins"));
 
     // Check for duplicate inputs
     set<COutPoint> vInOutPoints;
@@ -1332,7 +1338,7 @@ bool CTransaction::FetchInputs(CTxDB& txdb, const map<uint256, CTxIndex>& mapTes
             return DoS(100, error("FetchInputs() : %s prevout.n out of range %d %d %d prev tx %s\n%s", GetHash().ToString().substr(0,10).c_str(), prevout.n, txPrev.vout.size(), txindex.vSpent.size(), prevout.hash.ToString().substr(0,10).c_str(), txPrev.ToString().c_str()));
         }
     }
-
+    
     return true;
 }
 
@@ -1427,12 +1433,25 @@ bool CTransaction::ConnectInputs(CTxDB& txdb, MapPrevTx inputs,
     // ShinyCoin: Keep track of each currency separately
     map<CurrencyId, int64> mapValueIn;
     
-    // ShinyCoin: Tx can spend up to the mint amount for that new subcurrency
-    switch (nVersion) {
-        case TT_MINT_SUBCURRENCY:
-        case TT_REMINT_SUBCURRENCY:
-            mapValueIn[mint_subCurrencyId] += mint_numUnits;
-            break;
+    // ShinyCoin: vouts can spend up to the mint amount for that new subcurrency
+    if (nVersion == TT_MINT_SUBCURRENCY | nVersion == TT_REMINT_SUBCURRENCY) {
+        mapValueIn[mint_subCurrencyId] += mint_numUnits;
+    }
+    
+    // ShinyCoin: Check currency hasn't already been minted
+    if (nVersion == TT_MINT_SUBCURRENCY) {
+        if (txdb.ContainsCurrency(mint_subCurrencyId)) {
+            return DoS(10, error("ConnectInputs() : currency already exists"));
+        }
+        if (txdb.ContainsCurrency(mint_subCurrencyName)) {
+            return DoS(10, error("ConnectInputs() : currency name already taken"));
+        }
+    }
+    // ShinyCoin: Check reminting/chowning existing currency
+    if (nVersion == TT_REMINT_SUBCURRENCY || nVersion == TT_CHOWN_SUBCURRENCY) {
+        if (!txdb.ContainsCurrency(mint_subCurrencyId)) {
+            return DoS(100, error("ConnectInputs() : reminting non-existent currency"));
+        }
     }
     
     int64 nFees = 0;
@@ -1466,6 +1485,7 @@ bool CTransaction::ConnectInputs(CTxDB& txdb, MapPrevTx inputs,
     // The first loop above does all the inexpensive checks.
     // Only if ALL inputs pass do we perform expensive ECDSA signature checks.
     // Helps prevent CPU exhaustion attacks.
+    bool fCheckSigs = !(fBlock && (nBestHeight < Checkpoints::GetTotalBlocksEstimate()));
     for (unsigned int i = 0; i < vin.size(); i++)
     {
         COutPoint prevout = vin[i].prevout;
@@ -1482,13 +1502,14 @@ bool CTransaction::ConnectInputs(CTxDB& txdb, MapPrevTx inputs,
         // Skip ECDSA signature verification when connecting blocks (fBlock=true)
         // before the last blockchain checkpoint. This is safe because block merkle hashes are
         // still computed and checked, and any change will be caught at the next checkpoint.
-        if (!(fBlock && (nBestHeight < Checkpoints::GetTotalBlocksEstimate())))
+        if (fCheckSigs)
         {
             // Verify signature
             if (!VerifySignature(txPrev, *this, i, 0))
             {
                 return DoS(100,error("ConnectInputs() : %s VerifySignature failed", GetHash().ToString().substr(0,10).c_str()));
             }
+            
         }
 
         // Mark outpoints as spent
@@ -1498,6 +1519,40 @@ bool CTransaction::ConnectInputs(CTxDB& txdb, MapPrevTx inputs,
         if (fBlock || fMiner)
         {
             mapTestPool[prevout.hash] = txindex;
+        }
+    }
+    
+    // ShinyCoin: Write newly-minted subcurrency
+    if (nVersion == TT_MINT_SUBCURRENCY) {
+        CCurrency currency;
+        currency.cid = mint_subCurrencyId;
+        currency.strName = mint_subCurrencyName;
+        currency.nTotalUnits = mint_numUnits;
+        currency.nDivisibility = mint_divisibility;
+        currency.scriptPubKey = mint_scriptPubKey;
+        
+        if (!txdb.WriteCurrency(currency)) {
+            return error("ConnectInputs() : Failed to write new currency");
+        }
+    }
+
+    // ShinyCoin: Verify signature & write new changes for remint/chown
+    if (nVersion == TT_REMINT_SUBCURRENCY || nVersion == TT_CHOWN_SUBCURRENCY) {
+        CCurrency currency;
+        if (!txdb.ReadCurrency(mint_subCurrencyId, currency))
+            return error("ConnectInputs() : Could not read currency");
+        
+        if (fCheckSigs && !currency.VerifySignature(mint_scriptSig, *this))
+            return DoS(100, error("ConnectInputs() : remint/chown VerifyScript failed"));
+        
+        if (nVersion == TT_REMINT_SUBCURRENCY)
+            currency.nTotalUnits += mint_numUnits;
+        
+        if (nVersion == TT_CHOWN_SUBCURRENCY)
+            currency.scriptPubKey = mint_scriptPubKey;
+        
+        if (!txdb.WriteCurrency(currency)) {
+            return error("ConnectInputs() : Failed to write new currency");
         }
     }
 

@@ -13,6 +13,7 @@
 #include "hashblock/hashblock.h"
 #include "hashblock/ramhog_mt.h"
 #include "txinfo.h"
+#include "currency.h"
 
 #ifdef WIN32
 #include <io.h> /* for _commit */
@@ -31,9 +32,6 @@ class CAddress;
 class CInv;
 class CRequestTracker;
 class CNode;
-
-typedef std::vector<uint8_t> CurrencyId;
-extern CurrencyId cidShinys;
 
 static const unsigned int MAX_BLOCK_SIZE = 1000000;
 static const unsigned int MAX_BLOCK_SIZE_GEN = MAX_BLOCK_SIZE/2;
@@ -491,6 +489,8 @@ typedef std::map<uint256, std::pair<CTxIndex, CTransaction> > MapPrevTx;
  */
 class CTransaction
 {
+    static const std::string strValidCurrencyNameCharacters;
+    
 public:
     int nVersion;
     unsigned int nTime;
@@ -498,11 +498,11 @@ public:
     std::vector<CTxOut> vout;
     unsigned int nLockTime;
 
-    // MINT & REMINT: Full currency name, only lowercale alphanumeric with dashes,
+    // MINT: Full currency name, only lowercase alphanumeric with dashes,
     // must be unique
     std::string mint_subCurrencyName;
-    // Currency ID, also must be unique. Used instead of naem to save space in the
-    // blockchain.
+    // MINT & REMINT & CHOWN: Currency ID, also must be unique. Used instead of
+    // name to save space in the blockchain.
     std::vector<uint8_t> mint_subCurrencyId;
     // MINT & REMINT: How many currency coins to create
     // This transaction's vout must contain transactions sending exactly this many

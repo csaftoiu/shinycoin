@@ -10,6 +10,8 @@ CTxInfo::CTxInfo(const TxInfoRecord &record) : key(record.info.key), value(recor
 
 //------------------------------------------
 
+const std::string TxInfoKey::strValidIDCharacters("abcdefghijklmnopqrstuvwxyz0123456789-");
+
 std::string TxInfoKey::ToString() const
 {
     if (type == INFO_ID && keyString == "n")
@@ -53,13 +55,9 @@ bool TxInfoKey::IsValid(std::string &reason) const
         return false;
     }
     
-    for (std::string::const_iterator it = keyString.begin(); it != keyString.end(); ++it)
-    {
-        if (!TxInfoKey::IsValidIDCharacter(*it))
-        {
-            reason = "Invalid ID character in key";
-            return false;
-        }
+    if (!IsValidString(keyString, TxInfoKey::strValidIDCharacters)) {
+        reason = "Invalid ID character in key";
+        return false;
     }
     
     return true;
@@ -79,13 +77,9 @@ bool CTxInfo::IsValid(std::string &reason) const
     }
     
     if (key.type == INFO_ID) {
-        for (std::string::const_iterator it = value.begin(); it != value.end(); ++it)
-        {
-            if (!TxInfoKey::IsValidIDCharacter(*it))
-            {
-                reason = "Invalid ID character in value";
-                return false;
-            }
+        if (!IsValidString(value, TxInfoKey::strValidIDCharacters)) {
+            reason = "Invalid ID character in value";
+            return false;
         }
     }
     
