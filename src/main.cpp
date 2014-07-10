@@ -510,8 +510,8 @@ bool CTransaction::CheckTransaction() const
             return DoS(10, error("CTransaction::CheckTransaction() : Invalid tx version"));
     }
 
-    // ShinyCoin: Need at least 1 input, or to be minting
-    if (vin.empty() && !(nVersion == TT_MINT_SUBCURRENCY || TT_REMINT_SUBCURRENCY))
+    // Need at least 1 input
+    if (vin.empty())
         return DoS(10, error("CTransaction::CheckTransaction() : vin empty"));
 
     bool haveDbs = false;
@@ -1434,24 +1434,8 @@ bool CTransaction::ConnectInputs(CTxDB& txdb, MapPrevTx inputs,
     map<CurrencyId, int64> mapValueIn;
     
     // ShinyCoin: vouts can spend up to the mint amount for that new subcurrency
-    if (nVersion == TT_MINT_SUBCURRENCY | nVersion == TT_REMINT_SUBCURRENCY) {
+    if (nVersion == TT_MINT_SUBCURRENCY || nVersion == TT_REMINT_SUBCURRENCY) {
         mapValueIn[mint_subCurrencyId] += mint_numUnits;
-    }
-    
-    // ShinyCoin: Check currency hasn't already been minted
-    if (nVersion == TT_MINT_SUBCURRENCY) {
-        if (txdb.ContainsCurrency(mint_subCurrencyId)) {
-            return DoS(10, error("ConnectInputs() : currency already exists"));
-        }
-        if (txdb.ContainsCurrency(mint_subCurrencyName)) {
-            return DoS(10, error("ConnectInputs() : currency name already taken"));
-        }
-    }
-    // ShinyCoin: Check reminting/chowning existing currency
-    if (nVersion == TT_REMINT_SUBCURRENCY || nVersion == TT_CHOWN_SUBCURRENCY) {
-        if (!txdb.ContainsCurrency(mint_subCurrencyId)) {
-            return DoS(100, error("ConnectInputs() : reminting non-existent currency"));
-        }
     }
     
     int64 nFees = 0;
@@ -1482,50 +1466,38 @@ bool CTransaction::ConnectInputs(CTxDB& txdb, MapPrevTx inputs,
             return DoS(100, error("ConnectInputs() : txin values out of range"));
 
     }
-    // The first loop above does all the inexpensive checks.
-    // Only if ALL inputs pass do we perform expensive ECDSA signature checks.
-    // Helps prevent CPU exhaustion attacks.
+
+    // Skip ECDSA signature verification when connecting blocks (fBlock=true)
+    // before the last blockchain checkpoint. This is safe because block merkle hashes are
+    // still computed and checked, and any change will be caught at the next checkpoint.
     bool fCheckSigs = !(fBlock && (nBestHeight < Checkpoints::GetTotalBlocksEstimate()));
-    for (unsigned int i = 0; i < vin.size(); i++)
-    {
-        COutPoint prevout = vin[i].prevout;
-        assert(inputs.count(prevout.hash) > 0);
-        CTxIndex& txindex = inputs[prevout.hash].first;
-        CTransaction& txPrev = inputs[prevout.hash].second;
-
-        // Check for conflicts (double-spend)
-        // This doesn't trigger the DoS code on purpose; if it did, it would make it easier
-        // for an attacker to attempt to split the network.
-        if (!txindex.vSpent[prevout.n].IsNull())
-            return fMiner ? false : error("ConnectInputs() : %s prev tx already used at %s", GetHash().ToString().substr(0,10).c_str(), txindex.vSpent[prevout.n].ToString().c_str());
-
-        // Skip ECDSA signature verification when connecting blocks (fBlock=true)
-        // before the last blockchain checkpoint. This is safe because block merkle hashes are
-        // still computed and checked, and any change will be caught at the next checkpoint.
-        if (fCheckSigs)
-        {
-            // Verify signature
-            if (!VerifySignature(txPrev, *this, i, 0))
-            {
-                return DoS(100,error("ConnectInputs() : %s VerifySignature failed", GetHash().ToString().substr(0,10).c_str()));
-            }
-            
-        }
-
-        // Mark outpoints as spent
-        txindex.vSpent[prevout.n] = posThisTx;
-
-        // Write back
-        if (fBlock || fMiner)
-        {
-            mapTestPool[prevout.hash] = txindex;
-        }
-    }
     
-    // ShinyCoin: Write newly-minted subcurrency
+    // ShinyCoin: Check currency doesn't already exist, get minter name, and write new currency
     if (nVersion == TT_MINT_SUBCURRENCY) {
+        if (txdb.ContainsCurrency(mint_subCurrencyId)) {
+            return DoS(100, error("ConnectInputs() : currency id already exists"));
+        }
+        
+        assert(vin.size() > 0);
+        COutPoint& prevout = vin[0].prevout;
+        CTransaction& txPrev = inputs[prevout.hash].second;
+        CBitcoinAddress mintingAddress;
+        if (!ExtractAddress(txPrev.vout[prevout.n].scriptPubKey, mintingAddress))
+            return DoS(100, error("ConnectInputs() : minting address is non-standard"));
+        
+        boost::optional<TxInfoValue> optValName = ptxinfoStore->Get(mintingAddress, TxInfoKey(INFO_ID, "n"));
+        if (!optValName)
+            return DoS(100, error("ConnectInputs(): minting address has no name"));
+        
+        std::string strMinterName = optValName.get();
+        
+        if (txdb.ContainsCurrency(strMinterName, mint_subCurrencyName)) {
+            return DoS(100, error("ConnectInputs() : currency name already taken"));
+        }
+        
         CCurrency currency;
         currency.cid = mint_subCurrencyId;
+        currency.strMinterName = strMinterName;
         currency.strName = mint_subCurrencyName;
         currency.nTotalUnits = mint_numUnits;
         currency.nDivisibility = mint_divisibility;
@@ -1533,11 +1505,14 @@ bool CTransaction::ConnectInputs(CTxDB& txdb, MapPrevTx inputs,
         
         if (!txdb.WriteCurrency(currency)) {
             return error("ConnectInputs() : Failed to write new currency");
-        }
+        }        
     }
-
-    // ShinyCoin: Verify signature & write new changes for remint/chown
+    
+    // ShinyCoin: Check reminting/chowning existing currency, verify signature & write new changes
     if (nVersion == TT_REMINT_SUBCURRENCY || nVersion == TT_CHOWN_SUBCURRENCY) {
+        if (!txdb.ContainsCurrency(mint_subCurrencyId)) {
+            return DoS(100, error("ConnectInputs() : reminting non-existent currency"));
+            
         CCurrency currency;
         if (!txdb.ReadCurrency(mint_subCurrencyId, currency))
             return error("ConnectInputs() : Could not read currency");
@@ -1556,6 +1531,41 @@ bool CTransaction::ConnectInputs(CTxDB& txdb, MapPrevTx inputs,
         }
     }
 
+    // The first loop above does all the inexpensive checks.
+    // Only if ALL inputs pass do we perform expensive ECDSA signature checks.
+    // Helps prevent CPU exhaustion attacks.
+    for (unsigned int i = 0; i < vin.size(); i++)
+    {
+        COutPoint prevout = vin[i].prevout;
+        assert(inputs.count(prevout.hash) > 0);
+        CTxIndex& txindex = inputs[prevout.hash].first;
+        CTransaction& txPrev = inputs[prevout.hash].second;
+
+        // Check for conflicts (double-spend)
+        // This doesn't trigger the DoS code on purpose; if it did, it would make it easier
+        // for an attacker to attempt to split the network.
+        if (!txindex.vSpent[prevout.n].IsNull())
+            return fMiner ? false : error("ConnectInputs() : %s prev tx already used at %s", GetHash().ToString().substr(0,10).c_str(), txindex.vSpent[prevout.n].ToString().c_str());
+
+        if (fCheckSigs)
+        {
+            // Verify signature
+            if (!VerifySignature(txPrev, *this, i, 0))
+            {
+                return DoS(100,error("ConnectInputs() : %s VerifySignature failed", GetHash().ToString().substr(0,10).c_str()));
+            }
+        }
+
+        // Mark outpoints as spent
+        txindex.vSpent[prevout.n] = posThisTx;
+
+        // Write back
+        if (fBlock || fMiner)
+        {
+            mapTestPool[prevout.hash] = txindex;
+        }
+    }
+    
     if (IsCoinStake())
     {
         // ppcoin: coin stake tx earns reward instead of paying fee

@@ -315,8 +315,8 @@ public:
     bool EraseSignedHash(uint256 idHash);
     // ShinyCoin: currency data, CurrencyId -> CCurrency and name -> CurrencyId
     bool ContainsCurrency(const CurrencyId &cid);
-    bool ContainsCurrency(const std::string &strName);
-    bool ReadCurrencyId(const std::string &strName, CurrencyId &cid);
+    bool ContainsCurrency(const std::string &strMinterName, const std::string &strName);
+    bool ReadCurrencyId(const std::string &strMinterName, const std::string &strName, CurrencyId &cid);
     bool ReadCurrency(const CurrencyId &cid, CCurrency &currency);
     bool WriteCurrency(const CCurrency &currency);
     

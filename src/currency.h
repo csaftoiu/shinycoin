@@ -21,6 +21,7 @@ extern CurrencyId cidShinys;
 class CCurrency {
 public:
     CurrencyId cid;
+    std::string strMinterName;
     std::string strName;
     int64 nTotalUnits;
     int64 nDivisibility;
@@ -29,6 +30,7 @@ public:
     IMPLEMENT_SERIALIZE
     (
         READWRITE(cid);
+        READWRITE(strMinterName);
         READWRITE(strName);
         READWRITE(nTotalUnits);
         READWRITE(nDivisibility);
